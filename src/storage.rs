@@ -82,4 +82,20 @@ impl Storage {
             Err(io::Error::new(io::ErrorKind::NotFound, "note not found"))
         }
     }
+
+    pub fn wipe(&self) -> io::Result<usize> {
+        let mut count = 0usize;
+        if self.notes_dir.exists() {
+            for entry in fs::read_dir(&self.notes_dir)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                if name.to_string_lossy().ends_with(".md") {
+                    fs::remove_file(entry.path())?;
+                    count += 1;
+                }
+            }
+        }
+        fs::write(&self.counter_path, "1")?;
+        Ok(count)
+    }
 }

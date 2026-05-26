@@ -83,6 +83,16 @@ impl Config {
         })
     }
 
+    pub fn save(&self) -> io::Result<()> {
+        let path = self.config_dir.join("config");
+        let content = format!(
+            "# console_note config\neditor={}\nnotes_dir={}\n",
+            self.editor,
+            self.notes_dir.display()
+        );
+        fs::write(path, content)
+    }
+
     fn create_defaults(config_dir: &Path, config_path: &Path) -> io::Result<Self> {
         let editor = Self::default_editor();
         let notes_dir = Self::default_notes_dir(config_dir);

@@ -4,7 +4,7 @@ mod storage;
 
 use std::env;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -160,6 +160,46 @@ fn cmd_delete(storage: &Storage, id: u64) -> io::Result<()> {
     Ok(())
 }
 
+fn cmd_set(config: &mut Config, option: &str, value: &str) -> io::Result<()> {
+    match option {
+        "editor" => config.editor = value.to_string(),
+        "notes_dir" => {
+            let p = std::path::PathBuf::from(value);
+            if !p.is_absolute() {
+                eprintln!("error: notes_dir must be an absolute path");
+                return Ok(());
+            }
+            fs::create_dir_all(&p)?;
+            config.notes_dir = p;
+        }
+        _ => {
+            eprintln!("error: unknown option '{option}' (valid: editor, notes_dir)");
+            return Ok(());
+        }
+    }
+    config.save()?;
+    println!("Set {option} = {value}");
+    Ok(())
+}
+
+fn cmd_wipe(storage: &Storage) -> io::Result<()> {
+    print!("Are you sure you want to delete all notes? (y/N): ");
+    io::stdout().flush()?;
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    if !input.trim().eq_ignore_ascii_case("y") {
+        println!("Aborted.");
+        return Ok(());
+    }
+    let count = storage.wipe()?;
+    if count == 0 {
+        println!("No notes to wipe.");
+    } else {
+        println!("Wiped {} note(s).", count);
+    }
+    Ok(())
+}
+
 fn print_usage() {
     eprintln!("Usage:");
     eprintln!("  console_note add <title> [-c <content>]");
@@ -167,10 +207,12 @@ fn print_usage() {
     eprintln!("  console_note view <id>");
     eprintln!("  console_note edit <id> [-c <content>]");
     eprintln!("  console_note delete <id>");
+    eprintln!("  console_note --set <option> <value>");
+    eprintln!("  console_note --wipe");
 }
 
 fn main() -> io::Result<()> {
-    let config = Config::load_or_create()?;
+    let mut config = Config::load_or_create()?;
     let storage = Storage::new(&config);
 
     let args: Vec<String> = env::args().collect();
@@ -229,6 +271,14 @@ fn main() -> io::Result<()> {
             })?;
             cmd_delete(&storage, id)?;
         }
+        "--set" => {
+            if args.len() < 4 {
+                eprintln!("Usage: console_note --set <option> <value>");
+                return Ok(());
+            }
+            cmd_set(&mut config, &args[2], &args[3])?;
+        }
+        "--wipe" => cmd_wipe(&storage)?,
         _ => print_usage(),
     }
 
