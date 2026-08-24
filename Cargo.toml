@@ -1,8 +1,9 @@
 [package]
 name = "console_note"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.30.2"
+unicode-width = "0.2"
