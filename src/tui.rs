@@ -6,10 +6,11 @@ use ratatui::layout::{Alignment, Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, Borders, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
+    Block, Borders, Clear, List, ListItem, ListState, Paragraph, Scrollbar, ScrollbarOrientation,
     ScrollbarState, Wrap,
 };
 use ratatui::{DefaultTerminal, Frame};
+use unicode_width::UnicodeWidthStr;
 
 use crate::config::Config;
 use crate::editor;
@@ -550,18 +551,27 @@ impl<'a> App<'a> {
     }
 
     fn draw_title_input(&mut self, frame: &mut Frame) {
-        let area = centered_rect(60, 5, frame.area());
+        let area = popup_rect(60, 3, frame.area());
+        if area.width < 4 || area.height < 3 {
+            return;
+        }
+        frame.render_widget(Clear, area);
         let block = Block::default()
             .borders(Borders::ALL)
             .title(" New note title ")
             .border_style(Style::default().fg(Color::Yellow));
         frame.render_widget(Paragraph::new(self.input.clone()).block(block), area);
-        let width = self.input.len() as u16;
-        frame.set_cursor_position(Position::new(area.x + 1 + width, area.y + 1));
+        let inner_width = area.width.saturating_sub(2);
+        let cursor_offset = (self.input.width() as u16).min(inner_width.saturating_sub(1));
+        frame.set_cursor_position(Position::new(area.x + 1 + cursor_offset, area.y + 1));
     }
 
     fn draw_confirm(&mut self, frame: &mut Frame) {
-        let area = centered_rect(50, 3, frame.area());
+        let area = popup_rect(50, 3, frame.area());
+        if area.width < 4 || area.height < 3 {
+            return;
+        }
+        frame.render_widget(Clear, area);
         let text = match self.confirm_id {
             Some(id) => format!("Delete note {id}? (y/N)"),
             None => String::new(),
@@ -579,8 +589,8 @@ impl<'a> App<'a> {
     }
 }
 
-fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
-    let vertical = Layout::vertical([Constraint::Percentage(percent_y)]).flex(Flex::Center);
+fn popup_rect(percent_x: u16, height: u16, area: Rect) -> Rect {
+    let vertical = Layout::vertical([Constraint::Length(height)]).flex(Flex::Center);
     let [area] = vertical.areas(area);
     let horizontal = Layout::horizontal([Constraint::Percentage(percent_x)]).flex(Flex::Center);
     let [area] = horizontal.areas(area);
@@ -596,4 +606,168 @@ fn edit_with_editor(
     let result = editor::edit_content(editor_cmd, initial);
     *terminal = ratatui::init();
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    use super::*;
+    use crate::config::Config;
+    use crate::storage::Storage;
+
+    const STALE_MARKER: &str = "STALEMARKER";
+
+    struct TestEnv {
+        dir: PathBuf,
+        app: App<'static>,
+    }
+
+    impl Drop for TestEnv {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn test_env(tag: &str, note_title: &str, note_id: u64) -> TestEnv {
+        let dir = std::env::temp_dir().join(format!("console_note_tui_{tag}"));
+        let _ = fs::remove_dir_all(&dir);
+        let config = Config {
+            editor: "true".to_string(),
+            notes_dir: dir.join("notes"),
+            config_dir: dir.clone(),
+        };
+        fs::create_dir_all(&config.notes_dir).unwrap();
+        let storage = Storage::new(&config);
+        if !note_title.is_empty() {
+            storage
+                .create(&Note {
+                    id: note_id,
+                    title: format!("{STALE_MARKER} {note_title}"),
+                    content: String::new(),
+                    created_at: "2026-01-01T00:00:00Z".to_string(),
+                    updated_at: "2026-01-01T00:00:00Z".to_string(),
+                })
+                .unwrap();
+        }
+        let config_ref: &'static Config = Box::leak(Box::new(config));
+        let storage_ref: &'static Storage = Box::leak(Box::new(storage));
+        let app = App::new(storage_ref, config_ref);
+        TestEnv { dir, app }
+    }
+
+    fn draw(app: &mut App, width: u16, height: u16) -> Terminal<TestBackend> {
+        let backend = TestBackend::new(width, height);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        terminal
+    }
+
+    fn buffer_text(terminal: &Terminal<TestBackend>) -> String {
+        let buf = terminal.backend().buffer();
+        (0..buf.area.height)
+            .map(|y| {
+                (0..buf.area.width)
+                    .map(|x| buf[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn row_in(terminal: &Terminal<TestBackend>, rect: Rect, y: u16) -> String {
+        let buf = terminal.backend().buffer();
+        (rect.x..rect.right())
+            .map(|x| buf[(x, y)].symbol())
+            .collect::<String>()
+    }
+
+    #[test]
+    fn confirm_dialog_renders_text_inside_borders() {
+        for (width, height) in [(80, 24), (120, 30), (200, 50)] {
+            let mut env = test_env("confirm", "delete me", 7);
+            env.app.confirm_id = Some(7);
+            env.app.mode = Mode::ConfirmDelete;
+            let terminal = draw(&mut env.app, width, height);
+
+            let text = buffer_text(&terminal);
+            assert_eq!(
+                text.matches("Delete note 7? (y/N)").count(),
+                1,
+                "confirm text must render exactly once at {width}x{height}"
+            );
+
+            let rect = popup_rect(50, 3, Rect::new(0, 0, width, height));
+            assert_eq!(rect.height, 3);
+            assert!(row_in(&terminal, rect, rect.y).contains("Confirm"));
+            assert!(!row_in(&terminal, rect, rect.y + 1).contains(STALE_MARKER));
+        }
+    }
+
+    #[test]
+    fn title_input_dialog_shows_typed_text_without_bleedthrough() {
+        for (width, height) in [(80, 24), (200, 50)] {
+            let mut env = test_env("title_input", "old note", 1);
+            env.app.input = "hello world".to_string();
+            env.app.mode = Mode::TitleInput;
+            let terminal = draw(&mut env.app, width, height);
+
+            let rect = popup_rect(60, 3, Rect::new(0, 0, width, height));
+            assert_eq!(rect.height, 3);
+            assert!(row_in(&terminal, rect, rect.y).contains("New note title"));
+            assert!(row_in(&terminal, rect, rect.y + 1).contains("hello world"));
+            assert!(
+                !row_in(&terminal, rect, rect.y + 1).contains(STALE_MARKER),
+                "list content must not bleed through the dialog at {width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_uses_display_width_not_byte_length() {
+        let mut env = test_env("cursor_width", "", 0);
+        env.app.input = "héllo→".to_string();
+        env.app.mode = Mode::TitleInput;
+        let terminal = draw(&mut env.app, 100, 30);
+
+        let rect = popup_rect(60, 3, Rect::new(0, 0, 100, 30));
+        let expected_x = rect.x + 1 + 6;
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            Position::new(expected_x, rect.y + 1)
+        );
+    }
+
+    #[test]
+    fn cursor_is_clamped_to_inner_width() {
+        let mut env = test_env("cursor_clamp", "", 0);
+        env.app.input = "x".repeat(100);
+        env.app.mode = Mode::TitleInput;
+        let terminal = draw(&mut env.app, 40, 12);
+
+        let rect = popup_rect(60, 3, Rect::new(0, 0, 40, 12));
+        let expected_x = rect.x + rect.width - 2;
+        assert_eq!(
+            terminal.backend().cursor_position(),
+            Position::new(expected_x, rect.y + 1)
+        );
+    }
+
+    #[test]
+    fn dialogs_skip_rendering_on_tiny_terminals() {
+        let mut env = test_env("tiny", "", 0);
+        env.app.input = "abc".to_string();
+        env.app.mode = Mode::TitleInput;
+        let terminal = draw(&mut env.app, 20, 2);
+        assert!(!buffer_text(&terminal).contains("New note title"));
+
+        env.app.mode = Mode::ConfirmDelete;
+        env.app.confirm_id = Some(7);
+        let terminal = draw(&mut env.app, 20, 2);
+        assert!(!buffer_text(&terminal).contains("Delete note 7"));
+    }
 }
