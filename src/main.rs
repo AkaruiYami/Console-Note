@@ -101,6 +101,21 @@ fn cmd_edit(storage: &Storage, config: &Config, id: u64, content: Option<&str>) 
     Ok(())
 }
 
+fn cmd_rename(storage: &Storage, id: u64, new_title: &str) -> io::Result<()> {
+    let mut note = storage.read(id)?;
+
+    if note.title == new_title {
+        println!("No changes made.");
+        return Ok(());
+    }
+
+    note.title = new_title.to_string();
+    note.updated_at = current_timestamp();
+    storage.update(&note)?;
+    println!("Renamed note {}", id);
+    Ok(())
+}
+
 fn cmd_delete(storage: &Storage, id: u64) -> io::Result<()> {
     storage.delete(id)?;
     println!("Deleted note {}", id);
@@ -153,6 +168,7 @@ fn print_usage() {
     eprintln!("  console_note list");
     eprintln!("  console_note view <id>");
     eprintln!("  console_note edit <id> [-c <content>]");
+    eprintln!("  console_note rename <id> <new-title>");
     eprintln!("  console_note delete <id>");
     eprintln!("  console_note --set <option> <value>");
     eprintln!("  console_note --wipe");
@@ -206,6 +222,16 @@ fn main() -> io::Result<()> {
                 None
             };
             cmd_edit(&storage, &config, id, content)?;
+        }
+        "rename" | "mv" => {
+            if args.len() < 4 {
+                eprintln!("Usage: console_note rename <id> <new-title>");
+                return Ok(());
+            }
+            let id: u64 = args[2].parse().map_err(|_| {
+                io::Error::new(io::ErrorKind::InvalidInput, "invalid ID, must be a number")
+            })?;
+            cmd_rename(&storage, id, &args[3])?;
         }
         "delete" | "rm" => {
             if args.len() < 3 {

@@ -59,6 +59,8 @@ struct App<'a> {
     filter: String,
     filter_active: bool,
     input: String,
+    rename_id: Option<u64>,
+    input_origin: Mode,
     view_id: u64,
     view_scroll: u16,
     confirm_id: Option<u64>,
@@ -77,6 +79,8 @@ impl<'a> App<'a> {
             filter: String::new(),
             filter_active: false,
             input: String::new(),
+            rename_id: None,
+            input_origin: Mode::List,
             view_id: 0,
             view_scroll: 0,
             confirm_id: None,
@@ -180,8 +184,14 @@ impl<'a> App<'a> {
             }
             KeyCode::Char('n') => {
                 self.input.clear();
+                self.rename_id = None;
+                self.input_origin = Mode::List;
                 self.mode = Mode::TitleInput;
             }
+            KeyCode::Char('R') => match self.selected_id() {
+                Some(id) => self.start_rename(id),
+                None => self.set_message("No note selected.".to_string()),
+            },
             KeyCode::Char('e') => self.enter_edit(terminal)?,
             KeyCode::Char('d') | KeyCode::Delete => self.confirm_delete(),
             KeyCode::Char('r') => {
@@ -249,18 +259,19 @@ impl<'a> App<'a> {
     ) -> io::Result<()> {
         match key.code {
             KeyCode::Enter => {
-                let title = self.input.trim().to_string();
-                self.mode = Mode::List;
-                if title.is_empty() {
-                    self.set_message("No title provided; note not created.".to_string());
-                    return Ok(());
+                if let Some(id) = self.rename_id.take() {
+                    self.commit_rename(id)?;
+                } else {
+                    let title = self.input.trim().to_string();
+                    self.mode = Mode::List;
+                    if title.is_empty() {
+                        self.set_message("No title provided; note not created.".to_string());
+                        return Ok(());
+                    }
+                    self.create_note(&title, terminal)?;
                 }
-                self.create_note(&title, terminal)?;
             }
-            KeyCode::Esc => {
-                self.input.clear();
-                self.mode = Mode::List;
-            }
+            KeyCode::Esc => self.cancel_input(),
             KeyCode::Backspace => {
                 self.input.pop();
             }
@@ -284,6 +295,7 @@ impl<'a> App<'a> {
             KeyCode::Home => self.view_scroll = 0,
             KeyCode::End => self.view_scroll = u16::MAX,
             KeyCode::Char('e') => self.enter_edit(terminal)?,
+            KeyCode::Char('R') => self.start_rename(self.view_id),
             KeyCode::Esc | KeyCode::Backspace => {
                 self.mode = Mode::List;
                 self.clamp_selection();
@@ -334,6 +346,58 @@ impl<'a> App<'a> {
         Ok(())
     }
 
+    fn start_rename(&mut self, id: u64) {
+        match self.notes.iter().find(|n| n.id == id) {
+            Some(note) => {
+                self.input = note.title.clone();
+                self.rename_id = Some(id);
+                self.input_origin = self.mode;
+                self.mode = Mode::TitleInput;
+            }
+            None => self.set_message(format!("Note {id} not found.")),
+        }
+    }
+
+    fn cancel_input(&mut self) {
+        self.input.clear();
+        self.rename_id = None;
+        self.mode = self.input_origin;
+    }
+
+    fn commit_rename(&mut self, id: u64) -> io::Result<()> {
+        let title = self.input.trim().to_string();
+        self.rename_id = None;
+        self.mode = self.input_origin;
+
+        if title.is_empty() {
+            self.set_message("No title provided; title unchanged.".to_string());
+            return Ok(());
+        }
+
+        let mut note = match self.storage.read(id) {
+            Ok(note) => note,
+            Err(err) => {
+                self.set_message(format!("error: {err}"));
+                return Ok(());
+            }
+        };
+
+        if note.title == title {
+            self.set_message("No changes made.".to_string());
+            return Ok(());
+        }
+
+        note.title = title;
+        note.updated_at = current_timestamp();
+        if let Err(err) = self.storage.update(&note) {
+            self.set_message(format!("error: {err}"));
+            return Ok(());
+        }
+        self.reload();
+        self.set_message(format!("Renamed note {id}."));
+        Ok(())
+    }
+
     fn create_note(&mut self, title: &str, terminal: &mut DefaultTerminal) -> io::Result<()> {
         let body = match edit_with_editor(terminal, &self.config.editor, "") {
             Ok(body) => body,
@@ -376,7 +440,11 @@ impl<'a> App<'a> {
         match self.mode {
             Mode::View => self.draw_view(frame),
             Mode::TitleInput => {
-                self.draw_list(frame);
+                if self.input_origin == Mode::View {
+                    self.draw_view(frame);
+                } else {
+                    self.draw_list(frame);
+                }
                 self.draw_title_input(frame);
             }
             Mode::ConfirmDelete => {
@@ -455,7 +523,7 @@ impl<'a> App<'a> {
             status,
         );
 
-        let footer_text = " ↑/k ↓/j move  g/G jump  ↵ view  / search  n new  e edit  d delete  r refresh  q quit ";
+        let footer_text = " ↑/k ↓/j move  g/G jump  ↵ view  / search  n new  e edit  R rename  d delete  r refresh  q quit ";
         frame.render_widget(
             Paragraph::new(footer_text)
                 .style(Style::default().fg(Color::DarkGray))
@@ -537,7 +605,7 @@ impl<'a> App<'a> {
             ScrollbarState::new(self.content_line_count(note)).position(self.view_scroll as usize);
         frame.render_stateful_widget(scrollbar, content_area, &mut scrollbar_state);
 
-        let footer_text = " ↑/↓ j/k scroll  PgUp/PgDn page  e edit  Esc back  q quit ";
+        let footer_text = " ↑/↓ j/k scroll  PgUp/PgDn page  e edit  R rename  Esc back  q quit ";
         frame.render_widget(
             Paragraph::new(footer_text)
                 .style(Style::default().fg(Color::DarkGray))
@@ -556,9 +624,14 @@ impl<'a> App<'a> {
             return;
         }
         frame.render_widget(Clear, area);
+        let title = if self.rename_id.is_some() {
+            " Rename title "
+        } else {
+            " New note title "
+        };
         let block = Block::default()
             .borders(Borders::ALL)
-            .title(" New note title ")
+            .title(title)
             .border_style(Style::default().fg(Color::Yellow));
         frame.render_widget(Paragraph::new(self.input.clone()).block(block), area);
         let inner_width = area.width.saturating_sub(2);
@@ -725,6 +798,102 @@ mod tests {
                 "list content must not bleed through the dialog at {width}x{height}"
             );
         }
+    }
+
+    #[test]
+    fn rename_dialog_renders_prefilled_text_without_bleedthrough() {
+        for (width, height) in [(80, 24), (120, 30), (200, 50)] {
+            let mut env = test_env("rename_dialog", "old note", 1);
+            env.app.start_rename(1);
+            env.app.input = "hello world".to_string();
+            let terminal = draw(&mut env.app, width, height);
+
+            let rect = popup_rect(60, 3, Rect::new(0, 0, width, height));
+            assert_eq!(rect.height, 3);
+            assert!(row_in(&terminal, rect, rect.y).contains("Rename title"));
+            assert!(row_in(&terminal, rect, rect.y + 1).contains("hello world"));
+            assert!(
+                !row_in(&terminal, rect, rect.y + 1).contains(STALE_MARKER),
+                "list content must not bleed through the dialog at {width}x{height}"
+            );
+        }
+    }
+
+    #[test]
+    fn start_rename_prefills_input_with_current_title() {
+        let mut env = test_env("rename_prefill", "original name", 4);
+        env.app.mode = Mode::List;
+        env.app.start_rename(4);
+        assert_eq!(env.app.rename_id, Some(4));
+        assert_eq!(env.app.input_origin, Mode::List);
+        assert_eq!(env.app.mode, Mode::TitleInput);
+        assert_eq!(env.app.input, format!("{STALE_MARKER} original name"));
+    }
+
+    #[test]
+    fn commit_rename_updates_title_and_timestamp_on_disk() {
+        let mut env = test_env("rename_commit", "old name", 5);
+        env.app.start_rename(5);
+        env.app.input = "brand new name".to_string();
+
+        env.app.commit_rename(5).unwrap();
+
+        assert_eq!(env.app.mode, Mode::List);
+        assert_eq!(env.app.rename_id, None);
+        let note = env.app.storage.read(5).unwrap();
+        assert_eq!(note.title, "brand new name");
+        assert_eq!(note.created_at, "2026-01-01T00:00:00Z");
+        assert_ne!(note.updated_at, "2026-01-01T00:00:00Z");
+        assert!(env.app.notes.iter().any(|n| n.title == "brand new name"));
+    }
+
+    #[test]
+    fn rename_from_view_returns_to_view_mode() {
+        let mut env = test_env("rename_view", "viewed note", 9);
+        env.app.view_id = 9;
+        env.app.mode = Mode::View;
+        env.app.start_rename(9);
+        assert_eq!(env.app.input_origin, Mode::View);
+        assert_eq!(env.app.mode, Mode::TitleInput);
+
+        env.app.input = "renamed from view".to_string();
+        env.app.commit_rename(9).unwrap();
+
+        assert_eq!(env.app.mode, Mode::View);
+        let note = env.app.storage.read(9).unwrap();
+        assert_eq!(note.title, "renamed from view");
+    }
+
+    #[test]
+    fn commit_rename_rejects_blank_title() {
+        let mut env = test_env("rename_blank", "keep me", 2);
+        env.app.start_rename(2);
+        env.app.input = "   ".to_string();
+
+        env.app.commit_rename(2).unwrap();
+
+        assert_eq!(env.app.mode, Mode::List);
+        let note = env.app.storage.read(2).unwrap();
+        assert_eq!(note.title, format!("{STALE_MARKER} keep me"));
+        assert_eq!(note.updated_at, "2026-01-01T00:00:00Z");
+        assert_eq!(env.app.status, "No title provided; title unchanged.");
+    }
+
+    #[test]
+    fn cancel_rename_restores_original_mode_and_discards_changes() {
+        let mut env = test_env("rename_cancel", "untouched", 6);
+        env.app.view_id = 6;
+        env.app.mode = Mode::View;
+        env.app.start_rename(6);
+        assert_eq!(env.app.mode, Mode::TitleInput);
+
+        env.app.cancel_input();
+
+        assert_eq!(env.app.mode, Mode::View);
+        assert_eq!(env.app.rename_id, None);
+        assert!(env.app.input.is_empty());
+        let note = env.app.storage.read(6).unwrap();
+        assert_eq!(note.title, format!("{STALE_MARKER} untouched"));
     }
 
     #[test]

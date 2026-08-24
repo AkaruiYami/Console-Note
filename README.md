@@ -28,6 +28,7 @@ Running without arguments opens the interactive TUI.
 | `console_note list`                       | List all notes (`ls` works too)          |
 | `console_note view <id>`                  | Show a note                              |
 | `console_note edit <id> [-c <content>]`   | Edit a note (opens editor if no `-c`)    |
+| `console_note rename <id> <new-title>`    | Rename a note (`mv` works too)           |
 | `console_note delete <id>`                | Delete a note (`rm` works too)           |
 | `console_note --set <option> <value>`     | Set `editor` or `notes_dir`              |
 | `console_note --wipe`                     | Delete all notes (asks for confirmation) |
@@ -42,6 +43,7 @@ Running without arguments opens the interactive TUI.
 | `/`              | Search               |
 | `n`              | New note             |
 | `e`              | Edit note            |
+| `R`              | Rename note          |
 | `d`              | Delete note          |
 | `r`              | Refresh              |
 | `q` / `Esc`      | Quit / back          |
