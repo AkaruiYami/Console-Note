@@ -48,42 +48,71 @@ enum Mode {
     View,
     TitleInput,
     ConfirmDelete,
+    Settings,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum InputPurpose {
+    NewNote,
+    Rename(u64),
+    EditorSetting,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum SettingsRow {
+    Editor,
+    HideExtension,
+    NotesDir,
+}
+
+impl SettingsRow {
+    const COUNT: usize = 3;
+
+    fn from_index(index: usize) -> Self {
+        match index {
+            0 => SettingsRow::Editor,
+            1 => SettingsRow::HideExtension,
+            _ => SettingsRow::NotesDir,
+        }
+    }
 }
 
 struct App<'a> {
     storage: &'a Storage,
-    config: &'a Config,
+    config: Config,
     notes: Vec<Note>,
     list_state: ListState,
     mode: Mode,
     filter: String,
     filter_active: bool,
     input: String,
-    rename_id: Option<u64>,
+    input_purpose: InputPurpose,
     input_origin: Mode,
     view_id: u64,
     view_scroll: u16,
     confirm_id: Option<u64>,
+    settings_row: usize,
     status: String,
     should_quit: bool,
 }
 
 impl<'a> App<'a> {
-    fn new(storage: &'a Storage, config: &'a Config) -> Self {
+    fn new(storage: &'a Storage, config: &Config) -> Self {
         let mut app = App {
             storage,
-            config,
+            config: config.clone(),
             notes: Vec::new(),
             list_state: ListState::default(),
             mode: Mode::List,
             filter: String::new(),
             filter_active: false,
             input: String::new(),
-            rename_id: None,
+            input_purpose: InputPurpose::NewNote,
             input_origin: Mode::List,
             view_id: 0,
             view_scroll: 0,
             confirm_id: None,
+            settings_row: 0,
             status: String::new(),
             should_quit: false,
         };
@@ -145,6 +174,7 @@ impl<'a> App<'a> {
             Mode::View => self.handle_view_key(key, terminal),
             Mode::TitleInput => self.handle_title_input_key(key, terminal),
             Mode::ConfirmDelete => self.handle_confirm_key(key),
+            Mode::Settings => self.handle_settings_key(key),
         }
     }
 
@@ -184,9 +214,13 @@ impl<'a> App<'a> {
             }
             KeyCode::Char('n') => {
                 self.input.clear();
-                self.rename_id = None;
+                self.input_purpose = InputPurpose::NewNote;
                 self.input_origin = Mode::List;
                 self.mode = Mode::TitleInput;
+            }
+            KeyCode::Char('s') => {
+                self.settings_row = 0;
+                self.mode = Mode::Settings;
             }
             KeyCode::Char('R') => match self.selected_id() {
                 Some(id) => self.start_rename(id),
@@ -258,10 +292,16 @@ impl<'a> App<'a> {
         terminal: &mut DefaultTerminal,
     ) -> io::Result<()> {
         match key.code {
-            KeyCode::Enter => {
-                if let Some(id) = self.rename_id.take() {
+            KeyCode::Enter => match self.input_purpose {
+                InputPurpose::Rename(id) => {
+                    self.input_purpose = InputPurpose::NewNote;
                     self.commit_rename(id)?;
-                } else {
+                }
+                InputPurpose::EditorSetting => {
+                    self.input_purpose = InputPurpose::NewNote;
+                    self.commit_editor_setting()?;
+                }
+                InputPurpose::NewNote => {
                     let title = self.input.trim().to_string();
                     self.mode = Mode::List;
                     if title.is_empty() {
@@ -270,7 +310,7 @@ impl<'a> App<'a> {
                     }
                     self.create_note(&title, terminal)?;
                 }
-            }
+            },
             KeyCode::Esc => self.cancel_input(),
             KeyCode::Backspace => {
                 self.input.pop();
@@ -350,7 +390,7 @@ impl<'a> App<'a> {
         match self.notes.iter().find(|n| n.id == id) {
             Some(note) => {
                 self.input = note.title.clone();
-                self.rename_id = Some(id);
+                self.input_purpose = InputPurpose::Rename(id);
                 self.input_origin = self.mode;
                 self.mode = Mode::TitleInput;
             }
@@ -360,13 +400,12 @@ impl<'a> App<'a> {
 
     fn cancel_input(&mut self) {
         self.input.clear();
-        self.rename_id = None;
+        self.input_purpose = InputPurpose::NewNote;
         self.mode = self.input_origin;
     }
 
     fn commit_rename(&mut self, id: u64) -> io::Result<()> {
         let title = self.input.trim().to_string();
-        self.rename_id = None;
         self.mode = self.input_origin;
 
         if title.is_empty() {
@@ -395,6 +434,76 @@ impl<'a> App<'a> {
         }
         self.reload();
         self.set_message(format!("Renamed note {id}."));
+        Ok(())
+    }
+
+    fn start_editor_setting(&mut self) {
+        self.input = self.config.editor.clone();
+        self.input_purpose = InputPurpose::EditorSetting;
+        self.input_origin = Mode::Settings;
+        self.mode = Mode::TitleInput;
+    }
+
+    fn commit_editor_setting(&mut self) -> io::Result<()> {
+        let editor = self.input.trim().to_string();
+        self.mode = Mode::Settings;
+
+        if editor.is_empty() {
+            self.set_message("No editor provided; editor unchanged.".to_string());
+            return Ok(());
+        }
+
+        if self.config.editor == editor {
+            self.set_message("No changes made.".to_string());
+            return Ok(());
+        }
+
+        self.config.editor = editor;
+        match self.config.save() {
+            Ok(()) => self.set_message("Saved settings.".to_string()),
+            Err(err) => self.set_message(format!("error: {err}")),
+        }
+        Ok(())
+    }
+
+    fn toggle_hide_extension(&mut self) {
+        self.config.hide_extension = !self.config.hide_extension;
+        match self.config.save() {
+            Ok(()) => {
+                let state = if self.config.hide_extension {
+                    "on"
+                } else {
+                    "off"
+                };
+                self.set_message(format!("Hide extension {state}; settings saved."));
+            }
+            Err(err) => {
+                self.config.hide_extension = !self.config.hide_extension;
+                self.set_message(format!("error: {err}"));
+            }
+        }
+    }
+
+    fn handle_settings_key(&mut self, key: KeyEvent) -> io::Result<()> {
+        match key.code {
+            KeyCode::Up | KeyCode::Char('k') => {
+                self.settings_row = self.settings_row.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                self.settings_row = (self.settings_row + 1).min(SettingsRow::COUNT - 1);
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => match SettingsRow::from_index(self.settings_row)
+            {
+                SettingsRow::Editor => self.start_editor_setting(),
+                SettingsRow::HideExtension => self.toggle_hide_extension(),
+                SettingsRow::NotesDir => self.set_message(
+                    "notes_dir is read-only here; use: console_note --set notes_dir <path>"
+                        .to_string(),
+                ),
+            },
+            KeyCode::Esc | KeyCode::Backspace => self.mode = Mode::List,
+            _ => {}
+        }
         Ok(())
     }
 
@@ -439,11 +548,12 @@ impl<'a> App<'a> {
     fn draw(&mut self, frame: &mut Frame) {
         match self.mode {
             Mode::View => self.draw_view(frame),
+            Mode::Settings => self.draw_settings(frame),
             Mode::TitleInput => {
-                if self.input_origin == Mode::View {
-                    self.draw_view(frame);
-                } else {
-                    self.draw_list(frame);
+                match self.input_origin {
+                    Mode::View => self.draw_view(frame),
+                    Mode::Settings => self.draw_settings(frame),
+                    _ => self.draw_list(frame),
                 }
                 self.draw_title_input(frame);
             }
@@ -523,7 +633,7 @@ impl<'a> App<'a> {
             status,
         );
 
-        let footer_text = " ↑/k ↓/j move  g/G jump  ↵ view  / search  n new  e edit  R rename  d delete  r refresh  q quit ";
+        let footer_text = " ↑/k ↓/j move  g/G jump  ↵ view  / search  n new  e edit  R rename  d delete  s settings  r refresh  q quit ";
         frame.render_widget(
             Paragraph::new(footer_text)
                 .style(Style::default().fg(Color::DarkGray))
@@ -539,15 +649,133 @@ impl<'a> App<'a> {
         } else {
             &note.created_at
         };
-        Line::from(vec![
-            Span::styled(
-                format!("{:>4} ", note.id),
+        let mut spans = vec![Span::styled(
+            format!("{:>4} ", note.id),
+            Style::default().fg(Color::DarkGray),
+        )];
+        if !self.config.hide_extension {
+            spans.push(Span::styled(
+                format!("{:<8}", format!("{}.md", note.id)),
                 Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(title, Style::default().add_modifier(Modifier::BOLD)),
-            Span::raw("  "),
-            Span::styled(date.to_string(), Style::default().fg(Color::DarkGray)),
+            ));
+        }
+        spans.push(Span::styled(
+            title,
+            Style::default().add_modifier(Modifier::BOLD),
+        ));
+        spans.push(Span::raw("  "));
+        spans.push(Span::styled(
+            date.to_string(),
+            Style::default().fg(Color::DarkGray),
+        ));
+        Line::from(spans)
+    }
+
+    fn draw_settings(&mut self, frame: &mut Frame) {
+        let area = frame.area();
+        let [header, body, status, footer] = Layout::vertical([
+            Constraint::Length(3),
+            Constraint::Min(0),
+            Constraint::Length(1),
+            Constraint::Length(1),
         ])
+        .areas(area);
+
+        frame.render_widget(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .title(Line::from(Span::styled(
+                    " console_note — settings ",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )))
+                .title_alignment(Alignment::Center),
+            header,
+        );
+
+        let check = |on: bool| {
+            if on {
+                "[x]".to_string()
+            } else {
+                "[ ]".to_string()
+            }
+        };
+        let rows = [
+            (
+                "Editor",
+                self.config.editor.clone(),
+                Some("Enter to edit".to_string()),
+            ),
+            (
+                "Hide extension",
+                check(self.config.hide_extension),
+                Some("Enter to toggle".to_string()),
+            ),
+            (
+                "Notes directory",
+                self.config.notes_dir.display().to_string(),
+                None,
+            ),
+        ];
+
+        let selected = SettingsRow::from_index(self.settings_row);
+        let lines: Vec<Line> = rows
+            .iter()
+            .enumerate()
+            .map(|(i, (label, value, hint))| {
+                let row = SettingsRow::from_index(i);
+                let is_selected = row == selected;
+                let marker = if is_selected { "> " } else { "  " };
+                let label_style = if is_selected {
+                    Style::default()
+                        .fg(Color::White)
+                        .add_modifier(Modifier::BOLD)
+                        .bg(Color::DarkGray)
+                } else {
+                    Style::default().add_modifier(Modifier::BOLD)
+                };
+                let value_style = if is_selected {
+                    Style::default().fg(Color::White).bg(Color::DarkGray)
+                } else if row == SettingsRow::NotesDir {
+                    Style::default().fg(Color::DarkGray)
+                } else {
+                    Style::default().fg(Color::Cyan)
+                };
+                let mut spans = vec![
+                    Span::styled(marker.to_string(), label_style),
+                    Span::styled(format!("{:<16}", format!("{label}:")), label_style),
+                    Span::styled(format!("{value} "), value_style),
+                ];
+                if let Some(hint) = hint {
+                    let hint_style = if is_selected {
+                        Style::default().fg(Color::Yellow).bg(Color::DarkGray)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    };
+                    spans.push(Span::styled(format!("({hint})"), hint_style));
+                }
+                Line::from(spans)
+            })
+            .collect();
+
+        frame.render_widget(Paragraph::new(lines), body);
+
+        let status_style = if self.status.starts_with("error") {
+            Style::default().fg(Color::Red)
+        } else {
+            Style::default().fg(Color::Cyan)
+        };
+        frame.render_widget(
+            Paragraph::new(self.status.clone()).style(status_style),
+            status,
+        );
+
+        let footer_text = " ↑/↓ j/k move  ↵ edit/toggle  Esc back ";
+        frame.render_widget(
+            Paragraph::new(footer_text)
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center),
+            footer,
+        );
     }
 
     fn draw_view(&mut self, frame: &mut Frame) {
@@ -624,10 +852,10 @@ impl<'a> App<'a> {
             return;
         }
         frame.render_widget(Clear, area);
-        let title = if self.rename_id.is_some() {
-            " Rename title "
-        } else {
-            " New note title "
+        let title = match self.input_purpose {
+            InputPurpose::Rename(_) => " Rename title ",
+            InputPurpose::EditorSetting => " Editor command ",
+            InputPurpose::NewNote => " New note title ",
         };
         let block = Block::default()
             .borders(Borders::ALL)
@@ -713,6 +941,7 @@ mod tests {
             editor: "true".to_string(),
             notes_dir: dir.join("notes"),
             config_dir: dir.clone(),
+            hide_extension: true,
         };
         fs::create_dir_all(&config.notes_dir).unwrap();
         let storage = Storage::new(&config);
@@ -727,9 +956,8 @@ mod tests {
                 })
                 .unwrap();
         }
-        let config_ref: &'static Config = Box::leak(Box::new(config));
         let storage_ref: &'static Storage = Box::leak(Box::new(storage));
-        let app = App::new(storage_ref, config_ref);
+        let app = App::new(storage_ref, &config);
         TestEnv { dir, app }
     }
 
@@ -824,7 +1052,7 @@ mod tests {
         let mut env = test_env("rename_prefill", "original name", 4);
         env.app.mode = Mode::List;
         env.app.start_rename(4);
-        assert_eq!(env.app.rename_id, Some(4));
+        assert_eq!(env.app.input_purpose, InputPurpose::Rename(4));
         assert_eq!(env.app.input_origin, Mode::List);
         assert_eq!(env.app.mode, Mode::TitleInput);
         assert_eq!(env.app.input, format!("{STALE_MARKER} original name"));
@@ -839,7 +1067,6 @@ mod tests {
         env.app.commit_rename(5).unwrap();
 
         assert_eq!(env.app.mode, Mode::List);
-        assert_eq!(env.app.rename_id, None);
         let note = env.app.storage.read(5).unwrap();
         assert_eq!(note.title, "brand new name");
         assert_eq!(note.created_at, "2026-01-01T00:00:00Z");
@@ -890,10 +1117,101 @@ mod tests {
         env.app.cancel_input();
 
         assert_eq!(env.app.mode, Mode::View);
-        assert_eq!(env.app.rename_id, None);
+        assert_eq!(env.app.input_purpose, InputPurpose::NewNote);
         assert!(env.app.input.is_empty());
         let note = env.app.storage.read(6).unwrap();
         assert_eq!(note.title, format!("{STALE_MARKER} untouched"));
+    }
+
+    #[test]
+    fn settings_page_renders_current_values() {
+        for (width, height) in [(80, 24), (120, 30), (200, 50)] {
+            let mut env = test_env("settings_render", "", 0);
+            let notes_path = env.app.config.notes_dir.display().to_string();
+            env.app.mode = Mode::Settings;
+            let terminal = draw(&mut env.app, width, height);
+
+            let text = buffer_text(&terminal);
+            assert!(
+                text.contains("console_note — settings"),
+                "page title missing at {width}x{height}"
+            );
+            assert!(text.contains("Editor:"));
+            assert!(text.contains("true"));
+            assert!(text.contains("Hide extension:"));
+            assert!(text.contains("[x]"), "default hide_extension must show [x]");
+            assert!(text.contains("Notes directory:"));
+            assert!(text.contains(&notes_path));
+        }
+    }
+
+    #[test]
+    fn toggle_hide_extension_flips_value_and_persists_to_disk() {
+        let mut env = test_env("settings_toggle", "", 0);
+        assert!(env.app.config.hide_extension);
+        env.app.settings_row = 1;
+        env.app.mode = Mode::Settings;
+
+        env.app
+            .handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .unwrap();
+
+        assert!(!env.app.config.hide_extension);
+        assert_eq!(env.app.mode, Mode::Settings);
+        let raw = fs::read_to_string(env.dir.join("config")).unwrap();
+        assert!(raw.contains("hide_extension=false"));
+
+        env.app
+            .handle_settings_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::empty()))
+            .unwrap();
+        assert!(env.app.config.hide_extension);
+        let raw = fs::read_to_string(env.dir.join("config")).unwrap();
+        assert!(raw.contains("hide_extension=true"));
+    }
+
+    #[test]
+    fn editor_setting_commit_persists_to_disk() {
+        let mut env = test_env("settings_editor", "", 0);
+        env.app.mode = Mode::Settings;
+        env.app.start_editor_setting();
+        assert_eq!(env.app.input_purpose, InputPurpose::EditorSetting);
+        assert_eq!(env.app.input_origin, Mode::Settings);
+        assert_eq!(env.app.input, "true");
+
+        env.app.input = "nano".to_string();
+        env.app.commit_editor_setting().unwrap();
+
+        assert_eq!(env.app.mode, Mode::Settings);
+        assert_eq!(env.app.config.editor, "nano");
+        let raw = fs::read_to_string(env.dir.join("config")).unwrap();
+        assert!(raw.contains("editor=nano"));
+    }
+
+    #[test]
+    fn editor_setting_rejects_blank_and_unchanged_input() {
+        let mut env = test_env("settings_editor_blank", "", 0);
+        env.app.start_editor_setting();
+
+        env.app.input = "   ".to_string();
+        env.app.commit_editor_setting().unwrap();
+        assert_eq!(env.app.status, "No editor provided; editor unchanged.");
+        assert_eq!(env.app.config.editor, "true");
+
+        env.app.input = "true".to_string();
+        env.app.commit_editor_setting().unwrap();
+        assert_eq!(env.app.status, "No changes made.");
+    }
+
+    #[test]
+    fn list_shows_filenames_only_when_extension_visible() {
+        let mut env = test_env("filenames_hidden", "a note", 3);
+        env.app.mode = Mode::List;
+        let terminal = draw(&mut env.app, 80, 24);
+        assert!(!buffer_text(&terminal).contains(".md"));
+
+        env.app.config.hide_extension = false;
+        let terminal = draw(&mut env.app, 80, 24);
+        assert!(buffer_text(&terminal).contains("3.md"));
     }
 
     #[test]

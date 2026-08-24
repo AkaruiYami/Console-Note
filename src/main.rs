@@ -10,6 +10,7 @@ use std::fs;
 use std::io::{self, Write};
 
 use config::Config;
+use config::parse_bool;
 use note::Note;
 use storage::Storage;
 
@@ -46,7 +47,7 @@ fn cmd_add(
     Ok(())
 }
 
-fn cmd_list(storage: &Storage) -> io::Result<()> {
+fn cmd_list(storage: &Storage, config: &Config) -> io::Result<()> {
     let notes = storage.list()?;
     if notes.is_empty() {
         println!("No notes found.");
@@ -55,6 +56,11 @@ fn cmd_list(storage: &Storage) -> io::Result<()> {
     println!("{:<5} | {:<30} | Created", "ID", "Title");
     println!("{}", "-".repeat(55));
     for n in &notes {
+        let id_label = if config.hide_extension {
+            n.id.to_string()
+        } else {
+            format!("{}.md", n.id)
+        };
         let title = if n.title.len() > 28 {
             format!("{}..", &n.title[..28])
         } else {
@@ -65,7 +71,7 @@ fn cmd_list(storage: &Storage) -> io::Result<()> {
         } else {
             &n.created_at
         };
-        println!("{:<5} | {:<30} | {}", n.id, title, date);
+        println!("{:<5} | {:<30} | {}", id_label, title, date);
     }
     Ok(())
 }
@@ -134,8 +140,17 @@ fn cmd_set(config: &mut Config, option: &str, value: &str) -> io::Result<()> {
             fs::create_dir_all(&p)?;
             config.notes_dir = p;
         }
+        "hide_extension" => match parse_bool(value) {
+            Some(v) => config.hide_extension = v,
+            None => {
+                eprintln!("error: hide_extension must be a boolean (true/false/on/off)");
+                return Ok(());
+            }
+        },
         _ => {
-            eprintln!("error: unknown option '{option}' (valid: editor, notes_dir)");
+            eprintln!(
+                "error: unknown option '{option}' (valid: editor, notes_dir, hide_extension)"
+            );
             return Ok(());
         }
     }
@@ -197,7 +212,7 @@ fn main() -> io::Result<()> {
             };
             cmd_add(&storage, &config, title, content)?;
         }
-        "list" | "ls" => cmd_list(&storage)?,
+        "list" | "ls" => cmd_list(&storage, &config)?,
         "view" => {
             if args.len() < 3 {
                 eprintln!("Usage: console_note view <id>");

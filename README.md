@@ -7,8 +7,9 @@ A simple command-line note-taking app written in Rust. Notes are stored as Markd
 - Interactive TUI (no arguments) and full CLI
 - Search notes by title or content
 - Edit notes in your preferred external editor
+- In-app settings page (TUI: press `s`)
 - Plain-text storage: one Markdown file per note
-- Configurable editor and notes directory
+- Configurable editor, notes directory, and display options
 
 ## Build
 
@@ -30,7 +31,7 @@ Running without arguments opens the interactive TUI.
 | `console_note edit <id> [-c <content>]`   | Edit a note (opens editor if no `-c`)    |
 | `console_note rename <id> <new-title>`    | Rename a note (`mv` works too)           |
 | `console_note delete <id>`                | Delete a note (`rm` works too)           |
-| `console_note --set <option> <value>`     | Set `editor` or `notes_dir`              |
+| `console_note --set <option> <value>`     | Set `editor`, `notes_dir`, or `hide_extension` |
 | `console_note --wipe`                     | Delete all notes (asks for confirmation) |
 
 ## TUI keys
@@ -44,6 +45,7 @@ Running without arguments opens the interactive TUI.
 | `n`              | New note             |
 | `e`              | Edit note            |
 | `R`              | Rename note          |
+| `s`              | Settings page        |
 | `d`              | Delete note          |
 | `r`              | Refresh              |
 | `q` / `Esc`      | Quit / back          |
@@ -56,7 +58,14 @@ The config file is written to `%APPDATA%\console_note\config` on Windows or `~/.
 ```ini
 editor=notepad
 notes_dir=C:\Users\you\AppData\Roaming\console_note\notes
+hide_extension=true
 ```
+
+Options:
+
+- `editor` — the editor command
+- `notes_dir` — the notes directory (must be absolute)
+- `hide_extension` — hide the `.md` suffix in note listings (`true`/`false`, default `true`)
 
 Options can also be set via environment variables:
 
