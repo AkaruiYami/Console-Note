@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "description": "Simple command-line note-taking app with TUI and CLI, storing notes as Markdown files",
+    "homepage": "https://github.com/AkaruiYami/Console-Note",
+    "license": "MIT",
+    "architecture": {
+        "64bit": {
+            "url": "https://github.com/AkaruiYami/Console-Note/releases/download/v0.2.0/console_note-x86_64-pc-windows-msvc.zip",
+            "hash": "dfe2b7c66486eaed00c43a24789ffb77824519e059a9dbb17118ca28989ada1a"
+        }
+    },
+    "bin": "console_note.exe"
+}

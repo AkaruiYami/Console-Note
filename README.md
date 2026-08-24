@@ -11,6 +11,36 @@ A simple command-line note-taking app written in Rust. Notes are stored as Markd
 - Plain-text storage: one Markdown file per note
 - Configurable editor, notes directory, and display options
 
+## Install
+
+### Scoop (Windows)
+
+```powershell
+scoop install https://raw.githubusercontent.com/AkaruiYami/Console-Note/main/bucket/console-note.json
+```
+
+### Install script
+
+Windows:
+
+```powershell
+irm https://raw.githubusercontent.com/AkaruiYami/Console-Note/main/install.ps1 | iex
+```
+
+Linux (curl or wget):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/AkaruiYami/Console-Note/main/install.sh | sh
+```
+
+The script downloads the latest release, verifies the SHA256 checksum, and installs to `%USERPROFILE%\bin` (Windows) or `~/.local/bin` (Linux).
+
+### Cargo
+
+```bash
+cargo install --git https://github.com/AkaruiYami/Console-Note
+```
+
 ## Build
 
 ```bash

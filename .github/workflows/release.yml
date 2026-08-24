@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  BIN: console_note
+
+jobs:
+  build:
+    name: build (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package (unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          archive="${BIN}-${TARGET}.tar.gz"
+          tar -czf "$archive" -C "target/${TARGET}/release" "$BIN"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          $archive = "$env:BIN-$env:TARGET.zip"
+          Compress-Archive -Path "target/$env:TARGET/release/$env:BIN.exe" -DestinationPath $archive -Force
+          Add-Content -Encoding utf8NoBOM -Path $env:GITHUB_ENV -Value "ARCHIVE=$archive"
+
+      - name: Checksum
+        shell: bash
+        run: |
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          cat "$ARCHIVE.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            ${{ env.ARCHIVE }}
+            ${{ env.ARCHIVE }}.sha256
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: dist
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls -la dist
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            || gh release upload "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  update-manifest:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Update scoop manifest
+        env:
+          BIN: console_note
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/${BIN}-x86_64-pc-windows-msvc.zip"
+          hash="$(curl -fsSL "${url}.sha256" | awk '{print $1}')"
+          if [ -z "$hash" ]; then
+            echo "failed to fetch checksum for ${url}.sha256" >&2
+            exit 1
+          fi
+          jq --arg v "$version" --arg u "$url" --arg h "$hash" '
+            .version = $v
+            | .architecture["64bit"].url = $u
+            | .architecture["64bit"].hash = $h
+          ' bucket/console-note.json > bucket/console-note.json.tmp
+          mv bucket/console-note.json.tmp bucket/console-note.json
+          cat bucket/console-note.json
+
+      - name: Commit manifest update
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --exit-code --quiet -- bucket/console-note.json; then
+            echo "manifest already up to date"
+            exit 0
+          fi
+          git add bucket/console-note.json
+          git commit -m "chore: update scoop manifest to ${GITHUB_REF_NAME}"
+          git push origin main
