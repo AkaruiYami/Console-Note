@@ -24,6 +24,7 @@ impl Storage {
     }
 
     pub fn next_id(&self) -> io::Result<u64> {
+        self.reconcile_counter()?;
         let id = if self.counter_path.exists() {
             let raw = fs::read_to_string(&self.counter_path)?;
             raw.trim().parse::<u64>().unwrap_or(1)
@@ -32,6 +33,21 @@ impl Storage {
         };
         fs::write(&self.counter_path, (id + 1).to_string())?;
         Ok(id)
+    }
+
+    pub fn reconcile_counter(&self) -> io::Result<()> {
+        let current = fs::read_to_string(&self.counter_path)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(1);
+        let highest = self.list()?.iter().map(|note| note.id).max().unwrap_or(0);
+        let next = highest
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("note ID limit reached"))?;
+        if next > current {
+            fs::write(&self.counter_path, next.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn create(&self, note: &Note) -> io::Result<()> {

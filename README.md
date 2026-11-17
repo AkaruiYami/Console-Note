@@ -10,6 +10,7 @@ A simple command-line note-taking app written in Rust. Notes are stored as Markd
 - In-app settings page (TUI: press `s`)
 - Plain-text storage: one Markdown file per note
 - Configurable editor, notes directory, and display options
+- Automatic two-way sync to a private GitHub repository
 
 ## Install
 
@@ -41,7 +42,11 @@ The script downloads the latest release, verifies the SHA256 checksum, and insta
 cargo install --git https://github.com/AkaruiYami/Console-Note
 ```
 
-## Build
+### Manual download
+
+Download the latest Linux or Windows x64 archive from [GitHub Releases](https://github.com/AkaruiYami/Console-Note/releases/latest). Extract `console_note` or `console_note.exe` into a directory on your `PATH`. Download the newer archive and replace the binary to update. Notes and configuration remain in their configured locations.
+
+## Build from source
 
 ```bash
 cargo build --release
@@ -63,6 +68,10 @@ Running without arguments opens the interactive TUI.
 | `console_note delete <id>`                | Delete a note (`rm` works too)           |
 | `console_note --set <option> <value>`     | Set `editor`, `notes_dir`, or `hide_extension` |
 | `console_note --wipe`                     | Delete all notes (asks for confirmation) |
+| `console_note sync setup <client-id> <OWNER/REPO\|new:REPO>` | Connect or create a private GitHub repository |
+| `console_note sync now`                   | Sync immediately                         |
+| `console_note sync status`                | Show the connected repository            |
+| `console_note sync disconnect`            | Remove local sync settings and login     |
 
 ## TUI keys
 
@@ -76,6 +85,7 @@ Running without arguments opens the interactive TUI.
 | `e`              | Edit note            |
 | `R`              | Rename note          |
 | `s`              | Settings page        |
+| `S`              | Sync now             |
 | `d`              | Delete note          |
 | `r`              | Refresh              |
 | `q` / `Esc`      | Quit / back          |
@@ -115,6 +125,18 @@ updated=2026-08-16 10:00:00
 ---
 Note content here.
 ```
+
+## GitHub sync
+
+Register a GitHub App in GitHub Developer settings and enable **Device flow**. Give it **Contents: Read and write** repository permission. To let Console Note create a repository, also grant **Repository creation: Write**. Install the app on your account and select the private repository you want to use. For a new repository, the app can access repositories it creates. Copy the app's **Client ID** (not its App ID or client secret).
+
+Run `console_note sync setup CLIENT_ID OWNER/REPO` to connect an existing private repository, or `console_note sync setup CLIENT_ID new:console-notes` to create one. The app prints a GitHub verification URL and code. You can also open the TUI settings page and select **GitHub sync** for the same setup flow. The repository must be private. Notes are readable Markdown under its `notes/` directory. Use a dedicated repository for notes.
+
+The app syncs on launch and after note changes. While the TUI is open, it also watches for direct edits to `.md` files. Offline edits stay local and upload on the next successful sync. Changes made on two devices to the same note are preserved as separate notes; the extra copy is marked `sync conflict`. Deleting all notes with `--wipe` also deletes synced notes after confirmation.
+
+Login tokens are kept in the operating system credential store. If no credential store is available, setup fails without saving tokens in plain text. `sync disconnect` removes this device's credentials and sync settings but keeps its local notes and the GitHub repository. After disconnecting, you can change `notes_dir` or connect a different repository.
+
+On Linux, the credential store must provide the Secret Service API (`org.freedesktop.secrets`). If setup reports that the OS credential store is unavailable, enable and unlock a Secret Service provider before retrying. On Arch Linux, [KWallet](https://wiki.archlinux.org/title/KDE_Wallet) can provide this service; [GNOME Keyring](https://wiki.archlinux.org/title/GNOME/Keyring) is another option. From your normal desktop terminal, `busctl --user --list | rg org.freedesktop.secrets` shows whether the service is currently active. After enabling a provider, rerun `console_note sync setup` to get a new GitHub device code. No sync settings are saved when credential storage fails.
 
 ## Notes
 

@@ -1,7 +1,9 @@
-use std::io;
+use std::io::{self, Write};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::layout::{Alignment, Constraint, Flex, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -16,12 +18,14 @@ use crate::config::Config;
 use crate::editor;
 use crate::note::Note;
 use crate::storage::Storage;
+use crate::sync;
 use crate::time::current_timestamp;
 
 const POLL_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub fn run(storage: &Storage, config: &Config) -> io::Result<()> {
     let mut app = App::new(storage, config);
+    let _watcher = start_sync_worker(&mut app, config)?;
     let mut terminal = ratatui::init();
     let result = run_app(&mut app, &mut terminal);
     ratatui::restore();
@@ -30,6 +34,12 @@ pub fn run(storage: &Storage, config: &Config) -> io::Result<()> {
 
 fn run_app(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
     while !app.should_quit {
+        if let Some(receiver) = &app.sync_result
+            && let Ok(message) = receiver.try_recv()
+        {
+            app.reload();
+            app.set_message(message);
+        }
         terminal.draw(|frame| app.draw(frame))?;
         if event::poll(POLL_TIMEOUT)?
             && let Event::Key(key) = event::read()?
@@ -40,6 +50,45 @@ fn run_app(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+fn start_sync_worker(app: &mut App<'_>, config: &Config) -> io::Result<RecommendedWatcher> {
+    let (request_tx, request_rx) = mpsc::channel::<()>();
+    let (result_tx, result_rx) = mpsc::channel::<String>();
+    let watcher_tx = request_tx.clone();
+    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        if let Ok(event) = event
+            && event
+                .paths
+                .iter()
+                .any(|path| path.extension().is_some_and(|ext| ext == "md"))
+        {
+            let _ = watcher_tx.send(());
+        }
+    })
+    .map_err(io::Error::other)?;
+    watcher
+        .watch(&config.notes_dir, RecursiveMode::NonRecursive)
+        .map_err(io::Error::other)?;
+    let worker_config = config.clone();
+    std::thread::spawn(move || {
+        while request_rx.recv().is_ok() {
+            while request_rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+            let message = match sync::run(&worker_config) {
+                Ok(message) => message,
+                Err(err) => format!("error: sync: {err}"),
+            };
+            if result_tx.send(message).is_err() {
+                break;
+            }
+        }
+    });
+    app.sync_request = Some(request_tx.clone());
+    app.sync_result = Some(result_rx);
+    if sync::SyncState::load(config)?.is_some() {
+        let _ = request_tx.send(());
+    }
+    Ok(watcher)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,16 +112,18 @@ enum SettingsRow {
     Editor,
     HideExtension,
     NotesDir,
+    Sync,
 }
 
 impl SettingsRow {
-    const COUNT: usize = 3;
+    const COUNT: usize = 4;
 
     fn from_index(index: usize) -> Self {
         match index {
             0 => SettingsRow::Editor,
             1 => SettingsRow::HideExtension,
-            _ => SettingsRow::NotesDir,
+            2 => SettingsRow::NotesDir,
+            _ => SettingsRow::Sync,
         }
     }
 }
@@ -94,6 +145,8 @@ struct App<'a> {
     settings_row: usize,
     status: String,
     should_quit: bool,
+    sync_request: Option<Sender<()>>,
+    sync_result: Option<Receiver<String>>,
 }
 
 impl<'a> App<'a> {
@@ -115,6 +168,8 @@ impl<'a> App<'a> {
             settings_row: 0,
             status: String::new(),
             should_quit: false,
+            sync_request: None,
+            sync_result: None,
         };
         app.reload();
         app
@@ -174,6 +229,12 @@ impl<'a> App<'a> {
             Mode::View => self.handle_view_key(key, terminal),
             Mode::TitleInput => self.handle_title_input_key(key, terminal),
             Mode::ConfirmDelete => self.handle_confirm_key(key),
+            Mode::Settings
+                if matches!(key.code, KeyCode::Enter | KeyCode::Char(' '))
+                    && SettingsRow::from_index(self.settings_row) == SettingsRow::Sync =>
+            {
+                self.configure_or_sync(terminal)
+            }
             Mode::Settings => self.handle_settings_key(key),
         }
     }
@@ -232,6 +293,7 @@ impl<'a> App<'a> {
                 self.reload();
                 self.set_message("Refreshed.".to_string());
             }
+            KeyCode::Char('S') => self.request_sync(),
             KeyCode::Esc | KeyCode::Char('q') => self.should_quit = true,
             _ => {}
         }
@@ -270,6 +332,7 @@ impl<'a> App<'a> {
                     match self.storage.delete(id) {
                         Ok(()) => {
                             self.reload();
+                            self.request_sync();
                             self.set_message(format!("Deleted note {id}."));
                         }
                         Err(err) => self.set_message(format!("error: {err}")),
@@ -375,6 +438,25 @@ impl<'a> App<'a> {
             return Ok(());
         }
 
+        let latest = self.storage.read(id)?;
+        if latest.to_file_content() != note.to_file_content() {
+            let copy_id = self.storage.next_id()?;
+            let now = current_timestamp();
+            self.storage.create(&Note {
+                id: copy_id,
+                title: format!("{} (sync conflict)", note.title),
+                content: new_body,
+                created_at: now.clone(),
+                updated_at: now,
+            })?;
+            self.reload();
+            self.request_sync();
+            self.set_message(format!(
+                "Note changed while editing; saved as note {copy_id}."
+            ));
+            return Ok(());
+        }
+
         note.content = new_body;
         note.updated_at = current_timestamp();
         if let Err(err) = self.storage.update(&note) {
@@ -382,6 +464,7 @@ impl<'a> App<'a> {
             return Ok(());
         }
         self.reload();
+        self.request_sync();
         self.set_message(format!("Updated note {id}."));
         Ok(())
     }
@@ -433,6 +516,7 @@ impl<'a> App<'a> {
             return Ok(());
         }
         self.reload();
+        self.request_sync();
         self.set_message(format!("Renamed note {id}."));
         Ok(())
     }
@@ -500,9 +584,43 @@ impl<'a> App<'a> {
                     "notes_dir is read-only here; use: console_note --set notes_dir <path>"
                         .to_string(),
                 ),
+                SettingsRow::Sync => self.request_sync(),
             },
             KeyCode::Esc | KeyCode::Backspace => self.mode = Mode::List,
             _ => {}
+        }
+        Ok(())
+    }
+
+    fn request_sync(&mut self) {
+        if sync::SyncState::load(&self.config).ok().flatten().is_none() {
+            self.set_message("Sync is not configured; use Settings > GitHub sync.".to_string());
+        } else if let Some(sender) = &self.sync_request {
+            let _ = sender.send(());
+            self.set_message("Syncing...".to_string());
+        }
+    }
+
+    fn configure_or_sync(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        if sync::SyncState::load(&self.config)?.is_some() {
+            self.request_sync();
+            return Ok(());
+        }
+        ratatui::restore();
+        println!("GitHub sync setup. Register and install a GitHub App with device flow enabled.");
+        print!("GitHub App client ID: ");
+        io::stdout().flush()?;
+        let mut client_id = String::new();
+        io::stdin().read_line(&mut client_id)?;
+        print!("Private repository (OWNER/REPO or new:REPO): ");
+        io::stdout().flush()?;
+        let mut target = String::new();
+        io::stdin().read_line(&mut target)?;
+        let outcome = sync::setup(&self.config, client_id.trim(), target.trim());
+        *terminal = ratatui::init();
+        match outcome {
+            Ok(()) => self.request_sync(),
+            Err(err) => self.set_message(format!("error: sync setup: {err}")),
         }
         Ok(())
     }
@@ -542,6 +660,7 @@ impl<'a> App<'a> {
         }
         self.reload();
         self.set_message(format!("Created note {id}."));
+        self.request_sync();
         Ok(())
     }
 
@@ -633,7 +752,7 @@ impl<'a> App<'a> {
             status,
         );
 
-        let footer_text = " ↑/k ↓/j move  g/G jump  ↵ view  / search  n new  e edit  R rename  d delete  s settings  r refresh  q quit ";
+        let footer_text = " ↑/k ↓/j move  ↵ view  / search  n new  e edit  R rename  d delete  s settings  S sync  r refresh  q quit ";
         frame.render_widget(
             Paragraph::new(footer_text)
                 .style(Style::default().fg(Color::DarkGray))
@@ -714,6 +833,11 @@ impl<'a> App<'a> {
                 "Notes directory",
                 self.config.notes_dir.display().to_string(),
                 None,
+            ),
+            (
+                "GitHub sync",
+                sync::status(&self.config).unwrap_or_else(|_| "unavailable".to_string()),
+                Some("Enter to set up or sync".to_string()),
             ),
         ];
 

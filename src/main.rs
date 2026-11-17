@@ -2,6 +2,7 @@ mod config;
 mod editor;
 mod note;
 mod storage;
+mod sync;
 mod time;
 mod tui;
 
@@ -100,6 +101,21 @@ fn cmd_edit(storage: &Storage, config: &Config, id: u64, content: Option<&str>) 
         return Ok(());
     }
 
+    let latest = storage.read(id)?;
+    if latest.to_file_content() != note.to_file_content() {
+        let copy_id = storage.next_id()?;
+        let now = current_timestamp();
+        storage.create(&Note {
+            id: copy_id,
+            title: format!("{} (sync conflict)", note.title),
+            content: new_body,
+            created_at: now.clone(),
+            updated_at: now,
+        })?;
+        println!("Note changed while editing; saved your version as note {copy_id}.");
+        return Ok(());
+    }
+
     note.content = new_body;
     note.updated_at = current_timestamp();
     storage.update(&note)?;
@@ -132,6 +148,11 @@ fn cmd_set(config: &mut Config, option: &str, value: &str) -> io::Result<()> {
     match option {
         "editor" => config.editor = value.to_string(),
         "notes_dir" => {
+            if sync::SyncState::load(config)?.is_some() {
+                return Err(io::Error::other(
+                    "disconnect GitHub sync before changing notes_dir",
+                ));
+            }
             let p = std::path::PathBuf::from(value);
             if !p.is_absolute() {
                 eprintln!("error: notes_dir must be an absolute path");
@@ -159,8 +180,12 @@ fn cmd_set(config: &mut Config, option: &str, value: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn cmd_wipe(storage: &Storage) -> io::Result<()> {
-    print!("Are you sure you want to delete all notes? (y/N): ");
+fn cmd_wipe(storage: &Storage, config: &Config) -> io::Result<()> {
+    if sync::SyncState::load(config)?.is_some() {
+        print!("Delete all local and synced GitHub notes? (y/N): ");
+    } else {
+        print!("Are you sure you want to delete all notes? (y/N): ");
+    }
     io::stdout().flush()?;
     let mut input = String::new();
     io::stdin().read_line(&mut input)?;
@@ -187,6 +212,8 @@ fn print_usage() {
     eprintln!("  console_note delete <id>");
     eprintln!("  console_note --set <option> <value>");
     eprintln!("  console_note --wipe");
+    eprintln!("  console_note sync setup <client-id> <OWNER/REPO|new:REPO>");
+    eprintln!("  console_note sync now|status|disconnect");
 }
 
 fn main() -> io::Result<()> {
@@ -194,8 +221,27 @@ fn main() -> io::Result<()> {
     let storage = Storage::new(&config);
 
     let args: Vec<String> = env::args().collect();
+    if args.get(1).is_some_and(|arg| arg == "sync") {
+        match args.get(2).map(String::as_str) {
+            Some("setup") if args.len() == 5 => sync::setup(&config, &args[3], &args[4])?,
+            Some("now") => println!("{}", sync::run(&config)?),
+            Some("status") => println!("{}", sync::status(&config)?),
+            Some("disconnect") => {
+                sync::disconnect(&config)?;
+                println!("GitHub sync disconnected; local notes remain.");
+            }
+            _ => print_usage(),
+        }
+        return Ok(());
+    }
     if args.len() < 2 {
         return tui::run(&storage, &config);
+    }
+
+    if sync::SyncState::load(&config)?.is_some()
+        && let Err(err) = sync::run(&config)
+    {
+        eprintln!("sync: {err}");
     }
 
     match args[1].as_str() {
@@ -265,8 +311,17 @@ fn main() -> io::Result<()> {
             }
             cmd_set(&mut config, &args[2], &args[3])?;
         }
-        "--wipe" => cmd_wipe(&storage)?,
+        "--wipe" => cmd_wipe(&storage, &config)?,
         _ => print_usage(),
+    }
+
+    if matches!(
+        args[1].as_str(),
+        "add" | "edit" | "rename" | "mv" | "delete" | "rm" | "--wipe"
+    ) && sync::SyncState::load(&config)?.is_some()
+        && let Err(err) = sync::run(&config)
+    {
+        eprintln!("sync: {err}");
     }
 
     Ok(())
