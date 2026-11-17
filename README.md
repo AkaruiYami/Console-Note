@@ -14,6 +14,10 @@ A simple command-line note-taking app written in Rust. Notes are stored as Markd
 
 ## Install
 
+### Windows installer
+
+Download and run `console_note-windows-x64-setup.exe` from [the latest release](https://github.com/AkaruiYami/Console-Note/releases/latest). Launch Console Note from the Start Menu; it opens in a terminal. The installer is unsigned, so Windows may show a publisher warning.
+
 ### Scoop (Windows)
 
 ```powershell

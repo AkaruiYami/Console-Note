@@ -54,10 +54,23 @@ jobs:
           Compress-Archive -Path "target/$env:TARGET/release/$env:BIN.exe" -DestinationPath $archive -Force
           Add-Content -Encoding utf8NoBOM -Path $env:GITHUB_ENV -Value "ARCHIVE=$archive"
 
+      - name: Install Inno Setup
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install innosetup --yes --no-progress
+
+      - name: Package Windows installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "installer\console-note.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Checksum
         shell: bash
         run: |
           sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          if [ "$RUNNER_OS" = "Windows" ]; then sha256sum console_note-windows-x64-setup.exe > console_note-windows-x64-setup.exe.sha256; fi
           cat "$ARCHIVE.sha256"
 
       - name: Upload artifact
@@ -67,6 +80,7 @@ jobs:
           path: |
             ${{ env.ARCHIVE }}
             ${{ env.ARCHIVE }}.sha256
+            console_note-windows-x64-setup.exe*
           if-no-files-found: error
 
   release:
